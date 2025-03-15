@@ -1,3 +1,4 @@
+import ast
 import random
 import operator
 import bisect
@@ -232,8 +233,10 @@ class Chain:
             isinstance(obj, tuple) and not isinstance(obj[0], dict) or
             isinstance(obj, list) and not isinstance(obj[0], dict)
         ):
-            rehydrated = {tuple(item[0]): item[1] for item in obj[0]}
-            rehydrated_reversed = {tuple(item[0]): item[1] for item in obj[1]}
+            obj1 = json.loads(obj[0])
+            obj2 = json.loads(obj[1])
+            rehydrated = {tuple(item[0]): item[1] for item in obj1}
+            rehydrated_reversed = {tuple(item[0]): item[1] for item in obj2}
         elif isinstance(obj[0], dict):
             rehydrated = obj[0]
             rehydrated_reversed = obj[1]
