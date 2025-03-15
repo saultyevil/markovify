@@ -33,7 +33,7 @@ class Chain:
     For example: Sentences.
     """
 
-    def __init__(self, corpus, state_size, model=None):
+    def __init__(self, corpus, state_size, model=None, model_reversed=None):
         """
         `corpus`: A list of lists, where each outer list is a "run"
         of the process (e.g., a single sentence), and each inner list
@@ -44,10 +44,13 @@ class Chain:
         `state_size`: An integer indicating the number of items the model
         uses to represent its state. For text generation, 2 or 3 are typical.
         """
+        corpus_clone = copy.deepcopy(corpus)
         self.state_size = state_size
         self.model = model or self.build(corpus, self.state_size)
+        self.model_reversed = model_reversed or self.build_reverse(corpus_clone, self.state_size)
         self.compiled = (len(self.model) > 0) and (
-            type(self.model[tuple([BEGIN] * state_size)]) == list
+            type(self.model[tuple([BEGIN] * state_size)]) == list and (
+                type(self.model_reversed[tuple([BEGIN] * state_size)]) == list)
         )
         if not self.compiled:
             self.precompute_begin_state()
@@ -56,13 +59,17 @@ class Chain:
         if self.compiled:
             if inplace:
                 return self
-            return Chain(None, self.state_size, model=copy.deepcopy(self.model))
+            return Chain(None, self.state_size, model=copy.deepcopy(self.model), model_reversed=copy.deepcopy(self.model_reversed))
         mdict = {
             state: compile_next(next_dict) for (state, next_dict) in self.model.items()
         }
+        mdict_reversed = {
+            state: compile_next(next_dict) for (state, next_dict) in self.model_reversed.items()
+        }
         if not inplace:
-            return Chain(None, self.state_size, model=mdict)
+            return Chain(None, self.state_size, model=mdict, model_reversed=mdict_reversed)
         self.model = mdict
+        self.model_reversed = mdict_reversed
         self.compiled = True
         return self
 
@@ -80,6 +87,33 @@ class Chain:
         model = {}
 
         for run in corpus:
+            items = ([BEGIN] * state_size) + run + [END]
+            for i in range(len(run) + 1):
+                state = tuple(items[i : i + state_size])
+                follow = items[i + state_size]
+                if state not in model:
+                    model[state] = {}
+
+                if follow not in model[state]:
+                    model[state][follow] = 0
+
+                model[state][follow] += 1
+        return model
+
+    def build_reverse(self, corpus, state_size):
+        """
+        Build a Python representation of the Markov model.
+
+        Returns a dict of dicts where the keys of the outer dict
+        represent all possible states, and point to the inner dicts. The
+        inner dicts represent all possibilities for the "next" item in
+        the chain, along with the count of times it appears.
+        """
+        # Using a DefaultDict here would be a lot more convenient, however the memory
+        # usage is far higher.
+        model = {}
+        for run in corpus:
+            run.reverse()
             items = ([BEGIN] * state_size) + run + [END]
             for i in range(len(run) + 1):
                 state = tuple(items[i : i + state_size])
@@ -119,6 +153,22 @@ class Chain:
         selection = choices[bisect.bisect(cumdist, r)]
         return selection
 
+    def move_back(self, state):
+        """
+        Given a state, choose the next item at random.
+        """
+        if self.compiled:
+            choices, cumdist = self.model_reversed[state]
+        elif state == tuple([BEGIN] * self.state_size):
+            choices = self.begin_choices
+            cumdist = self.begin_cumdist
+        else:
+            choices, weights = zip(*self.model_reversed[state].items(), strict=False)
+            cumdist = list(accumulate(weights))
+        r = random.random() * cumdist[-1]
+        selection = choices[bisect.bisect(cumdist, r)]
+        return selection
+
     def gen(self, init_state=None):
         """
         Starting either with a naive BEGIN state, or the provided `init_state`
@@ -133,6 +183,20 @@ class Chain:
             yield next_word
             state = tuple(state[1:]) + (next_word,)
 
+    def gen_back(self, init_state=None):
+        """
+        Starting either with a naive BEGIN state, or the provided
+        `init_state` (as a tuple), return a generator that will yield
+        successive items until the chain reaches the END state.
+        """
+        state = init_state or (BEGIN,) * self.state_size
+        while True:
+            next_word = self.move_back(state)
+            if next_word == END:
+                break
+            yield next_word
+            state = tuple(state[1:]) + (next_word,)
+
     def walk(self, init_state=None):
         """
         Return a list representing a single run of the Markov model, either
@@ -141,11 +205,20 @@ class Chain:
         """
         return list(self.gen(init_state))
 
+    def walk_back(self, init_state=None):
+        """
+        Return a list representing a single run of the Markov model, either
+        starting with a naive BEGIN state, or the provided `init_state` (as a
+        tuple).
+        """
+        return list(self.gen_back(init_state))
+
+
     def to_json(self):
         """
         Dump the model as a JSON object, for loading later.
         """
-        return json.dumps(list(self.model.items()))
+        return json.dumps(list(self.model.items())), json.dumps(list(self.model_reversed.items()))
 
     @classmethod
     def from_json(cls, json_thing):
@@ -153,17 +226,21 @@ class Chain:
         Given a JSON object or JSON string that was created by `self.to_json`,
         return the corresponding markovify.Chain.
         """
-
         obj = json.loads(json_thing) if isinstance(json_thing, str) else json_thing
 
-        if isinstance(obj, list):
-            rehydrated = {tuple(item[0]): item[1] for item in obj}
-        elif isinstance(obj, dict):
-            rehydrated = obj
+        if (
+            isinstance(obj, tuple) and not isinstance(obj[0], dict) or
+            isinstance(obj, list) and not isinstance(obj[0], dict)
+        ):
+            rehydrated = {tuple(item[0]): item[1] for item in obj[0]}
+            rehydrated_reversed = {tuple(item[0]): item[1] for item in obj[1]}
+        elif isinstance(obj[0], dict):
+            rehydrated = obj[0]
+            rehydrated_reversed = obj[1]
         else:
-            raise ValueError("Object should be dict or list")
+            raise ValueError("Object should be tuple of list or dict")
 
         state_size = len(list(rehydrated.keys())[0])
 
-        inst = cls(None, state_size, rehydrated)
+        inst = cls(None, state_size, rehydrated, rehydrated_reversed)
         return inst

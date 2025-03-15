@@ -48,6 +48,13 @@ class MarkovifyTestBase(unittest.TestCase):
         assert sent is not None
         assert start_str == sent[: len(start_str)]
 
+    def test_make_setence_that_contains(self):
+        text_model = self.sherlock_model
+        contains_str = "dog"
+        sent = text_model.make_sentence_that_contains(contains_str)
+        assert sent is not None
+        assert contains_str in sent
+
     def test_make_sentence_with_start_one_word(self):
         text_model = self.sherlock_model
         start_str = "Sherlock"

@@ -135,6 +135,12 @@ class Text:
         """
         return re.split(self.word_split_pattern, sentence)
 
+    def word_split_and_reverse(self, sentence):
+        """
+        Splits a sentence into a list of words.
+        """
+        return re.split(self.word_split_pattern, sentence)[::-1]
+
     def word_join(self, words):
         """
         Re-joins a list of words into a sentence.
@@ -240,6 +246,51 @@ class Text:
                 return self.word_join(words)
         return None
 
+    def make_sentence_back(self, init_state=None, **kwargs):
+        """Attempts `tries` (default: 10) times to generate a valid sentence,
+        based on the model and `test_sentence_output`. Passes
+        `max_overlap_ratio` and `max_overlap_total` to `test_sentence_output`.
+
+        If successful, returns the sentence as a string. If not, returns None.
+
+        If `init_state` (a tuple of `self.chain.state_size` words) is not specified,
+        this method chooses a sentence-start at random, in accordance with
+        the model.
+
+        If `test_output` is set as False then the `test_sentence_output` check
+        will be skipped.
+
+        If `max_words` or `min_words` are specified, the word count for the sentence will be
+        evaluated against the provided limit(s).
+        """
+        tries = kwargs.get("tries", DEFAULT_TRIES)
+        mor = kwargs.get("max_overlap_ratio", DEFAULT_MAX_OVERLAP_RATIO)
+        mot = kwargs.get("max_overlap_total", DEFAULT_MAX_OVERLAP_TOTAL)
+        test_output = kwargs.get("test_output", True)
+        max_words = kwargs.get("max_words", None)
+        min_words = kwargs.get("min_words", None)
+
+        if init_state is not None:
+            prefix = list(init_state)
+            for word in prefix:
+                if word == BEGIN:
+                    prefix = prefix[1:]
+                else:
+                    break
+        else:
+            prefix = []
+
+        for _ in range(tries):
+            words = prefix + self.chain.walk_back(init_state)
+            if (max_words is not None and len(words) > max_words) or (min_words is not None and len(words) < min_words):
+                continue  # pragma: no cover # see https://github.com/nedbat/coveragepy/issues/198
+            if test_output and hasattr(self, "rejoined_text"):
+                if self.test_sentence_output(words, mor, mot):
+                    return self.word_join(words)
+            else:
+                return self.word_join(words)
+        return None
+
     def make_short_sentence(self, max_chars, min_chars=0, **kwargs):
         """
         Tries making a sentence of no more than `max_chars` characters and optionally
@@ -295,6 +346,88 @@ class Text:
         err_msg = (
             f"`make_sentence_with_start` can't find sentence beginning with {beginning}"
         )
+        raise ParamError(err_msg)
+
+    def make_sentence_that_finish(self, finishing, **kwargs):
+        """Tries making a sentence that finish with `finishing` string, which
+        should be a string of one to `self.state` words known to exist in the
+        corpus.
+
+        **kwargs are passed to `self.make_sentence`
+        """
+        split = tuple(self.word_split_and_reverse(finishing))
+        word_count = len(split)
+
+        if word_count == self.state_size:
+            init_states = [split]
+        elif word_count > 0 and word_count < self.state_size:
+            init_states = [
+                key
+                for key in self.chain.model_reversed.keys()
+                # check for starting with begin as well ordered
+                # lists
+                if tuple(filter(lambda x: x != BEGIN, key))[:word_count] == split
+            ]
+
+            random.shuffle(init_states)
+        else:
+            err_msg = f"`make_sentence_that_finish` for this model requires a string containing 1 to {self.state_size} words. Yours has {word_count}: {split!s}"
+            raise ParamError(err_msg)
+
+        for init_state in init_states:
+            output = self.make_sentence_back(init_state, **kwargs)
+            if output is not None:
+                reversed_output = reversed(output.split(" "))
+                return " ".join(reversed_output)
+        err_msg = f"`make_sentence_that_finish` can't find sentence finishing with {finishing}"
+        raise ParamError(err_msg)
+
+    def make_sentence_that_contains(self, contains, **kwargs):
+        """Tries making a sentence that contains with `contains` string, which
+        should be a string of one to `self.state` words known to exist in the
+        corpus.
+
+        **kwargs are passed to `self.make_sentence`
+        """
+        split = tuple(self.word_split(contains))
+        word_count = len(split)
+
+        if word_count == self.state_size:
+            init_states = [split]
+
+        elif word_count > 0 and word_count < self.state_size:
+            init_states = [
+                key
+                for key in self.chain.model.keys()
+                # check for starting with begin as well ordered
+                # lists
+                if tuple(filter(lambda x: x != BEGIN, key))[:word_count] == split
+            ]
+
+            random.shuffle(init_states)
+        else:
+            err_msg = f"`make_sentence_that_contains` for this model requires a string containing 1 to {self.state_size} words. Yours has {word_count}: {split!s}"
+            raise ParamError(err_msg)
+        for init_state in init_states:
+            output = self.make_sentence(init_state, **kwargs)
+            # print(output)
+            if output is not None:
+                end_of_sentence = output
+                end_of_sentence_first_word = end_of_sentence.split(" ")[1]
+                # print(contains)
+                # print(end_of_sentence_first_word)
+                output = self.make_sentence_that_finish(contains + " " + end_of_sentence_first_word, **kwargs)
+                if output is not None:
+                    output = output.split(" ")
+                    # pop 2 words that are in the other sentence
+                    output.pop()
+                    output.pop()
+                    begin_of_sentence = output
+
+                    begin_of_sentence_ordered = " ".join(begin_of_sentence)
+
+                    return begin_of_sentence_ordered + " " + end_of_sentence
+        err_msg = f"`make_sentence_that_contains` can't find sentence that contains {contains}"
         raise ParamError(err_msg)
 
     @functools.lru_cache(maxsize=1)
