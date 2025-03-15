@@ -11,7 +11,7 @@ def get_model_dict(thing):
         if thing.chain.compiled:
             raise ValueError("Not implemented for compiled markovify.Chain")
         return thing.chain.model, thing.chain.model_reversed
-    if isinstance(thing, list):
+    if isinstance(thing, (list, tuple)):
         return dict(thing[0]), dict(thing[1])
     if isinstance(thing, dict):
         return thing[0], thing[1]
